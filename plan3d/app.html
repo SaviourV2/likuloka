@@ -88,6 +88,19 @@ textarea { resize: vertical; min-height: 68px; }
 .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .status { font-size: 13px; color: var(--muted); min-height: 1.2em; }
 .status.err { color: var(--accent); }
+.drop { width: 100%; display: flex; flex-direction: column; gap: 3px; text-align: left; padding: 12px; background: var(--paper); border: 1px dashed var(--muted); border-radius: 3px; color: var(--ink); font: 400 14px var(--font-body); cursor: pointer; }
+.drop strong { font-weight: 600; }
+.drop small { font-size: 12px; color: var(--muted); }
+.drop.over, .pane-plan.over { outline: 2px solid var(--accent); outline-offset: -2px; }
+.file-row { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 10px; align-items: center; }
+.file-row img { width: 64px; height: 64px; object-fit: cover; border: 1px solid var(--line); background: #fff; }
+.file-name { font-size: 13px; overflow-wrap: anywhere; }
+.pager { display: flex; align-items: center; gap: 8px; font: 400 12px var(--font-data); color: var(--muted); }
+.pager .btn { padding: 2px 9px; }
+.stack { display: flex; flex-direction: column; gap: 10px; }
+.field input[type="range"] { padding: 0; accent-color: var(--accent); }
+#plan.calib, #plan.calib .room { cursor: crosshair; }
+.zoom { position: absolute; top: 8px; right: 8px; background: var(--surface); font-size: 12px; padding: 4px 9px; }
 .presets { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .presets button { text-align: left; display: flex; flex-direction: column; gap: 1px; padding: 8px 10px; }
 .presets small { font: 400 11px var(--font-data); color: var(--muted); }
@@ -138,7 +151,7 @@ details .inner { display: flex; flex-direction: column; gap: 10px; }
         <button type="button" class="btn" id="resetView">Reset view</button>
       </div>
       <div class="panes mode-both" id="panes">
-        <div class="pane pane-plan"><svg id="plan" role="img" aria-label="Floor plan drawing"></svg></div>
+        <div class="pane pane-plan"><svg id="plan" role="img" aria-label="Floor plan drawing"></svg><button type="button" class="btn zoom" id="zoomBtn" hidden>Zoom to the home</button></div>
         <div class="pane pane-3d">
           <canvas id="view3d" aria-label="3D model of the floor plan"></canvas>
           <p class="hint" id="hint3d">Drag to orbit. Scroll or pinch to zoom.</p>
@@ -148,6 +161,33 @@ details .inner { display: flex; flex-direction: column; gap: 10px; }
     </section>
 
     <aside class="side">
+      <section class="card" id="fileCard">
+        <h2>Start from a file</h2>
+        <button type="button" class="drop" id="drop"><strong>Upload a floor plan, land drawing or PDF</strong><small>PNG, JPG, WebP or PDF. A saved plan (.json) works too. You can also drop or paste a file.</small></button>
+        <input id="fileIn" type="file" accept="image/*,application/pdf,.pdf,.json,.txt" hidden>
+        <div class="stack" id="fileLoaded" hidden>
+          <div class="file-row">
+            <img id="thumb" alt="">
+            <div class="stack">
+              <div class="file-name" id="fileName"></div>
+              <div class="pager" id="pager" hidden><button type="button" class="btn" id="pgPrev" aria-label="Previous page">‹</button><span id="pgLabel"></span><button type="button" class="btn" id="pgNext" aria-label="Next page">›</button></div>
+            </div>
+          </div>
+          <div class="stack" id="readBox" hidden>
+            <div class="field"><label for="readMode">This drawing is</label><select id="readMode"><option value="auto">Let Claude decide</option><option value="floorplan">A floor plan to trace</option><option value="land">Land to design a home on</option></select></div>
+            <div class="field"><label for="readNote">Notes for Claude (optional)</label><textarea id="readNote" placeholder="The plot is 15 × 30 m. I want three bedrooms."></textarea></div>
+            <div class="row"><button type="button" class="btn primary" id="readBtn">Read it with Claude</button><button type="button" class="btn" id="readStop" hidden>Stop</button></div>
+          </div>
+          <div class="field"><label for="ulOpacity">Drawing under the plan</label><input type="range" id="ulOpacity" min="0" max="100" value="55"></div>
+          <div class="row"><button type="button" class="btn" id="ulScale">Set scale</button><button type="button" class="btn" id="ulClear">Clear rooms</button><button type="button" class="btn danger" id="ulRemove">Remove drawing</button></div>
+          <div class="stack" id="scaleForm" hidden>
+            <div class="field"><label for="scaleM">Real distance between the two points (m)</label><input id="scaleM" type="number" min="0.1" step="0.01" inputmode="decimal"></div>
+            <div class="row"><button type="button" class="btn primary" id="scaleApply">Apply scale</button><button type="button" class="btn" id="scaleCancel">Cancel</button></div>
+          </div>
+        </div>
+        <div class="status" id="fileStatus" role="status"></div>
+      </section>
+
       <section class="card" id="askCard" hidden>
         <h2>Describe a home</h2>
         <textarea id="askText" placeholder="A 75 m² flat for two with a home office and an open kitchen" aria-label="Describe the home you want"></textarea>
@@ -176,7 +216,7 @@ details .inner { display: flex; flex-direction: column; gap: 10px; }
           <div class="field"><label for="edH">Depth (m)</label><input id="edH" type="number" min="1" max="30" step="0.25" inputmode="decimal"></div>
           <div class="field wide"><button type="button" class="btn danger" id="delRoom">Delete room</button></div>
         </div>
-        <p>Drag a room on the plan to move it and drag a corner to resize. Rooms that share an edge get a door.</p>
+        <p>Drag a room on the plan to move it and drag a corner to resize. Rooms that share an edge get a door between them.</p>
       </section>
 
       <section class="card">
@@ -282,14 +322,22 @@ function normalizePlan(obj) {
   const rooms = raw.filter(r => r.w > 0.4 && r.h > 0.4).slice(0, 24).map(r => {
     const name = String(r.name || '').trim().slice(0, 40) || 'Room';
     const type = TYPES[r.type] ? r.type : guessType(name);
-    return { id: 'r' + (++uid), name, type, x: snap(r.x), y: snap(r.y), w: clamp(snap(r.w), 1, 30), h: clamp(snap(r.h), 1, 30) };
+    // snap the edges, not the size, so rooms that shared an edge still do
+    const x = snap(r.x), y = snap(r.y);
+    return { id: 'r' + (++uid), name, type, x, y, w: clamp(snap(r.x + r.w) - x, 1, 40), h: clamp(snap(r.y + r.h) - y, 1, 40) };
   });
   if (!rooms.length) throw new Error('The plan has no usable rooms.');
   const minX = Math.min(...rooms.map(r => r.x)), minY = Math.min(...rooms.map(r => r.y));
   rooms.forEach(r => { r.x -= minX; r.y -= minY; });
-  return { name: String(obj.name || 'Untitled home').trim().slice(0, 60) || 'Untitled home', rooms };
+  let plot = null;
+  if (Array.isArray(obj.plot)) {
+    plot = obj.plot.filter(q => Array.isArray(q) && q.length >= 2 && Number.isFinite(Number(q[0])) && Number.isFinite(Number(q[1]))).slice(0, 40).map(q => [Math.round((Number(q[0]) - minX) * 100) / 100, Math.round((Number(q[1]) - minY) * 100) / 100]);
+    if (plot.length < 3) plot = null;
+  }
+  return { name: String(obj.name || 'Untitled home').trim().slice(0, 60) || 'Untitled home', rooms, plot, shift: { x: minX, y: minY } };
 }
-const exportPlan = p => ({ name: p.name, units: 'm', rooms: p.rooms.map(r => ({ name: r.name, type: r.type, x: r.x, y: r.y, w: r.w, h: r.h })) });
+const exportPlan = p => { const o = { name: p.name, units: 'm', rooms: p.rooms.map(r => ({ name: r.name, type: r.type, x: r.x, y: r.y, w: r.w, h: r.h })) }; if (p.plot) o.plot = p.plot; return o; };
+const polyArea = q => Math.abs(q.reduce((s, a, i) => { const c = q[(i + 1) % q.length]; return s + a[0] * c[1] - c[0] * a[1]; }, 0)) / 2;
 function bounds(p) {
   const x0 = Math.min(...p.rooms.map(r => r.x)), y0 = Math.min(...p.rooms.map(r => r.y));
   const x1 = Math.max(...p.rooms.map(r => r.x + r.w)), y1 = Math.max(...p.rooms.map(r => r.y + r.h));
@@ -552,9 +600,19 @@ function furnish(plan, an) {
 }
 
 /* ---------- state ---------- */
-const state = { plan: null, sel: null, an: null, mode: 'both', furniture: true, cut: true };
+const state = { plan: null, sel: null, an: null, mode: 'both', furniture: true, cut: true, zoomHome: false };
 const store = { get() { try { return JSON.parse(localStorage.getItem('roomlines.plan') || 'null'); } catch (e) { return null; } }, set(v) { try { localStorage.setItem('roomlines.plan', JSON.stringify(v)); } catch (e) {} } };
 const selected = () => state.plan.rooms.find(r => r.id === state.sel) || null;
+// the uploaded drawing: shown under the plan at (x, y) in metres, mpp = metres per image pixel
+const under = { url: null, blob: null, name: '', w: 0, h: 0, x: 0, y: 0, mpp: 0.01, opacity: 0.55 };
+let calib = null;
+function extent() {
+  const b = bounds(state.plan), e = { x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1 };
+  const add = (x, y) => { e.x0 = Math.min(e.x0, x); e.y0 = Math.min(e.y0, y); e.x1 = Math.max(e.x1, x); e.y1 = Math.max(e.y1, y); };
+  if (state.plan.plot) state.plan.plot.forEach(q => add(q[0], q[1]));
+  if (under.url) { add(under.x, under.y); add(under.x + under.w * under.mpp, under.y + under.h * under.mpp); }
+  return e;
+}
 
 function setPlan(plan, fit = true) {
   state.plan = plan; state.sel = null; frozenBox = null;
@@ -575,15 +633,30 @@ function select(id) { state.sel = id; render2D(); renderList(); syncEditor(true)
 
 /* ---------- 2D plan ---------- */
 const svg = $('#plan');
-let frozenBox = null;
+svg.innerHTML = '<image id="ulImg" preserveAspectRatio="none" pointer-events="none" display="none"/><g id="dyn"></g>';
+const ulImg = svg.querySelector('#ulImg'), dyn = svg.querySelector('#dyn');
+let frozenBox = null, ulShown = null;
 function render2D() {
-  const p = state.plan, an = state.an, b = bounds(p);
-  const box = frozenBox || { x: b.x0 - 1.5, y: b.y0 - 1.5, w: b.w + 2.5, h: b.h + 3.0 };
+  const p = state.plan, an = state.an, b = bounds(p), e = extent();
+  const big = e.x1 - e.x0 > b.w + 0.5 || e.y1 - e.y0 > b.h + 0.5, v = big && state.zoomHome ? b : e;
+  $('#zoomBtn').hidden = !big; $('#zoomBtn').textContent = state.zoomHome ? 'Show the whole drawing' : 'Zoom to the home';
+  const box = frozenBox || { x: v.x0 - 1.5, y: v.y0 - 1.5, w: v.x1 - v.x0 + 2.5, h: v.y1 - v.y0 + 3.0 };
   svg.setAttribute('viewBox', `${box.x} ${box.y} ${box.w} ${box.h}`);
+  if (under.url) {
+    if (ulShown !== under.url) { ulImg.setAttribute('href', under.url); ulShown = under.url; }
+    ulImg.setAttribute('x', under.x); ulImg.setAttribute('y', under.y); ulImg.setAttribute('width', under.w * under.mpp); ulImg.setAttribute('height', under.h * under.mpp);
+    ulImg.setAttribute('opacity', under.opacity); ulImg.setAttribute('display', 'inline');
+  } else { ulImg.setAttribute('display', 'none'); ulShown = null; }
+  const dim = under.url ? 0.55 : 1;
   const fs = clamp(Math.max(box.w, box.h) / 34, 0.2, 0.42);
   let h = `<defs><pattern id="grid" width="1" height="1" patternUnits="userSpaceOnUse"><path d="M1 0H0V1" fill="none" stroke="var(--grid)" stroke-width="0.02"/></pattern></defs>`;
   h += `<rect x="${box.x}" y="${box.y}" width="${box.w}" height="${box.h}" fill="url(#grid)" data-bg="1"/>`;
-  for (const r of p.rooms) h += `<rect class="room" data-room="${r.id}" x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" fill="${TYPES[r.type].fill}" fill-opacity="${r.id === state.sel ? 0.62 : 0.4}"/>`;
+  if (p.plot) {
+    const cx = p.plot.reduce((s, q) => s + q[0], 0) / p.plot.length, top = Math.min(...p.plot.map(q => q[1])), pfs = clamp(Math.max(box.w, box.h) / 42, 0.25, 1.6);
+    h += `<polygon points="${p.plot.map(q => q.join(',')).join(' ')}" fill="#7fae6a" fill-opacity="0.14" stroke="var(--muted)" stroke-width="0.05" stroke-dasharray="0.3 0.18" pointer-events="none"/>`;
+    h += `<text class="data" x="${cx}" y="${top + pfs * 1.3}" font-size="${pfs}" text-anchor="middle">Plot · ${polyArea(p.plot).toFixed(0)} m²</text>`;
+  }
+  for (const r of p.rooms) h += `<rect class="room" data-room="${r.id}" x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" fill="${TYPES[r.type].fill}" fill-opacity="${(r.id === state.sel ? 0.62 : 0.4) * dim}"/>`;
   // walls with gaps at openings
   for (const w of an.pieces) {
     const th = w.ext ? 0.2 : 0.1, ops = [...w.openings].sort((a, c) => a.t0 - c.t0);
@@ -629,18 +702,35 @@ function render2D() {
     h += `<rect x="${s.x}" y="${s.y}" width="${s.w}" height="${s.h}" fill="none" stroke="var(--accent)" stroke-width="0.06" pointer-events="none"/>`;
     for (const [k, hx, hy] of [['nw', s.x, s.y], ['ne', s.x + s.w, s.y], ['sw', s.x, s.y + s.h], ['se', s.x + s.w, s.y + s.h]]) h += `<circle class="handle ${k}" data-handle="${k}" cx="${hx}" cy="${hy}" r="${hr}" stroke-width="0.05"/>`;
   }
-  svg.innerHTML = h;
+  if (calib) {
+    const cr = clamp(Math.max(box.w, box.h) / 90, 0.08, 0.3);
+    if (calib.pts.length === 2) h += `<line x1="${calib.pts[0].x}" y1="${calib.pts[0].y}" x2="${calib.pts[1].x}" y2="${calib.pts[1].y}" stroke="var(--accent)" stroke-width="${cr * 0.5}" stroke-dasharray="${cr * 1.5} ${cr}" pointer-events="none"/>`;
+    for (const q of calib.pts) h += `<circle cx="${q.x}" cy="${q.y}" r="${cr}" fill="var(--accent)" stroke="var(--surface)" stroke-width="${cr * 0.3}" pointer-events="none"/>`;
+  }
+  svg.classList.toggle('calib', !!calib);
+  dyn.innerHTML = h;
 }
 let drag = null;
 const toPlan = e => { const m = svg.getScreenCTM(); if (!m) return { x: 0, y: 0 }; const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(m.inverse()); return { x: p.x, y: p.y }; };
 svg.addEventListener('pointerdown', e => {
+  if (calib) {
+    e.preventDefault();
+    if (calib.pts.length >= 2) calib.pts = [];
+    calib.pts.push(toPlan(e));
+    if (calib.pts.length === 2) {
+      const [a, c] = calib.pts;
+      $('#scaleForm').hidden = false; $('#scaleM').value = Math.hypot(c.x - a.x, c.y - a.y).toFixed(2);
+      fileStatus('Type the real distance between the two points, then apply.');
+    } else { $('#scaleForm').hidden = true; fileStatus('Now click the other end of that length.'); }
+    render2D(); return;
+  }
   const hEl = e.target.closest('[data-handle]'), rEl = e.target.closest('[data-room]');
   if (!hEl && !rEl) { if (state.sel) select(null); return; }
   if (rEl && rEl.dataset.room !== state.sel) select(rEl.dataset.room);
   const r = selected(); if (!r) return;
   e.preventDefault();
   const vb = svg.viewBox.baseVal; frozenBox = { x: vb.x, y: vb.y, w: vb.width, h: vb.height };
-  drag = { id: e.pointerId, handle: hEl ? hEl.dataset.handle : null, start: toPlan(e), o: { x: r.x, y: r.y, w: r.w, h: r.h }, moved: false };
+  drag = { id: e.pointerId, handle: hEl ? hEl.dataset.handle : null, start: toPlan(e), o: { x: r.x, y: r.y, w: r.w, h: r.h } };
   try { svg.setPointerCapture(e.pointerId); } catch (err) {}
 });
 svg.addEventListener('pointermove', e => {
@@ -656,16 +746,11 @@ svg.addEventListener('pointermove', e => {
     if (drag.handle.includes('n')) { h = Math.max(1, o.h - dy); y = o.y + o.h - h; }
   }
   if (x === r.x && y === r.y && w === r.w && h === r.h) return;
-  Object.assign(r, { x, y, w, h }); drag.moved = true; changed(true);
+  Object.assign(r, { x, y, w, h }); changed(true);
 });
 const endDrag = e => {
   if (!drag || e.pointerId !== drag.id) return;
-  const moved = drag.moved; drag = null; frozenBox = null;
-  if (moved) {
-    const b = bounds(state.plan);
-    state.plan.rooms.forEach(r => { r.x -= b.x0; r.y -= b.y0; });
-    if (b.x0 || b.y0) view.shift(-b.x0, -b.y0);
-  }
+  drag = null; frozenBox = null;
   changed();
 };
 svg.addEventListener('pointerup', endDrag); svg.addEventListener('pointercancel', endDrag);
@@ -714,10 +799,11 @@ document.querySelector('.seg').addEventListener('click', e => { const b = e.targ
 $('#optFurniture').addEventListener('change', e => { state.furniture = e.target.checked; view.build(); });
 $('#optCut').addEventListener('change', e => { state.cut = e.target.checked; view.build(); });
 $('#resetView').addEventListener('click', () => view.fit());
+$('#zoomBtn').addEventListener('click', () => { state.zoomHome = !state.zoomHome; render2D(); });
 
 /* ---------- 3D view ---------- */
 const view = (() => {
-  const canvas = $('#view3d'), noop = { build() {}, fit() {}, resize() {}, shift() {} };
+  const canvas = $('#view3d'), noop = { build() {}, fit() {}, resize() {} };
   if (typeof THREE === 'undefined') { $('#nogl').hidden = false; $('#nogl').textContent = 'The 3D library did not load. Check the connection and reload. The plan still works.'; $('#hint3d').hidden = true; return noop; }
   let renderer;
   try { renderer = new THREE.WebGLRenderer({ canvas, antialias: true }); } catch (e) { $('#nogl').hidden = false; $('#hint3d').hidden = true; return noop; }
@@ -783,6 +869,10 @@ const view = (() => {
       me.castShadow = cast; me.receiveShadow = true; group.add(me); return me;
     };
     box(b.x0 - 0.22, b.x1 + 0.22, -0.07, -0.004, b.y0 - 0.22, b.y1 + 0.22, mat(0x9aa3ab));
+    if (state.plan.plot) {
+      const g = new THREE.ShapeGeometry(new THREE.Shape(state.plan.plot.map(q => new THREE.Vector2(q[0], -q[1])))).rotateX(-Math.PI / 2);
+      const land = new THREE.Mesh(g, mat(0x8fae78)); land.position.y = -0.045; land.receiveShadow = true; land.userData.own = true; group.add(land);
+    }
     for (const r of state.plan.rooms) {
       const fm = floorMats[TYPES[r.type].floor], s = fm.map.metres;
       const g = new THREE.PlaneGeometry(r.w, r.h).rotateX(-Math.PI / 2).translate(r.x + r.w / 2, 0, r.y + r.h / 2), pos = g.attributes.position, uv = g.attributes.uv;
@@ -881,56 +971,238 @@ const view = (() => {
   if (typeof MutationObserver !== 'undefined') new MutationObserver(theme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   (function loop() { requestAnimationFrame(loop); if (dirty) { dirty = false; renderer.render(scene, camera); } })();
   theme();
-  return { build, fit() { resize(); fit(); }, resize, shift(dx, dz) { orbit.target.x += dx; orbit.target.z += dz; cam(); } };
+  return { build, fit() { resize(); fit(); }, resize };
 })();
 
-/* ---------- ask Claude for a layout ---------- */
-const ASK = `You are laying out a home floor plan for a web tool. Reply with only one JSON object and no other text.
+/* ---------- uploaded drawing ---------- */
+const PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
+function fileStatus(t, err) { const el = $('#fileStatus'); el.className = 'status' + (err ? ' err' : ''); el.textContent = t; }
+const loadScript = src => new Promise((ok, no) => { const el = document.createElement('script'); el.src = src; el.onload = ok; el.onerror = () => no(new Error('script')); document.head.appendChild(el); });
+async function pdfLib() { if (!window.pdfjsLib) { await loadScript(PDFJS + 'pdf.min.js'); await loadScript(PDFJS + 'pdf.worker.min.js'); } return window.pdfjsLib; }
+let pdf = null, pdfPage = 1, pdfName = '', canSee = false;
+function syncFile() {
+  $('#fileLoaded').hidden = !under.url; if (!under.url) return;
+  $('#thumb').src = under.url; $('#fileName').textContent = under.name;
+  $('#pager').hidden = !(pdf && pdf.numPages > 1); if (pdf) $('#pgLabel').textContent = `Page ${pdfPage} of ${pdf.numPages}`;
+  $('#readBox').hidden = !canSee;
+}
+function endCalib() { calib = null; $('#scaleForm').hidden = true; $('#ulScale').textContent = 'Set scale'; }
+function setDrawing(src, sw, sh, name) {
+  const k = Math.min(1, 1800 / Math.max(sw, sh)), c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(sw * k)); c.height = Math.max(1, Math.round(sh * k));
+  const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(src, 0, 0, c.width, c.height);
+  const b = bounds(state.plan);
+  Object.assign(under, { url: c.toDataURL('image/jpeg', 0.88), blob: null, name, w: c.width, h: c.height, x: b.x0, y: b.y0, mpp: Math.max(12, b.w) / c.width });
+  c.toBlob(bl => { under.blob = bl; }, 'image/jpeg', 0.9);
+  endCalib(); syncFile(); render2D();
+  if (state.mode === '3d') setMode('plan');
+  fileStatus(canSee ? 'Drawing loaded under the plan. Let Claude read it, or set the scale and draw the rooms over it.' : 'Drawing loaded under the plan at a guessed size. Set the scale, then draw the rooms over it.');
+}
+async function showPdfPage() {
+  const page = await pdf.getPage(pdfPage), v1 = page.getViewport({ scale: 1 });
+  const vp = page.getViewport({ scale: clamp(1800 / Math.max(v1.width, v1.height), 0.5, 4) }), c = document.createElement('canvas');
+  c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+  await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+  setDrawing(c, c.width, c.height, pdf.numPages > 1 ? `${pdfName}, page ${pdfPage}` : pdfName);
+}
+const loadImage = file => new Promise((ok, no) => { const url = URL.createObjectURL(file), img = new Image(); img.onload = () => { ok(img); URL.revokeObjectURL(url); }; img.onerror = () => { no(new Error('image')); URL.revokeObjectURL(url); }; img.src = url; });
+async function handleFile(file) {
+  if (!file) return;
+  const name = file.name || 'Pasted image', ext = (name.includes('.') ? name.split('.').pop() : '').toLowerCase(), type = file.type || '';
+  try {
+    if (type === 'application/pdf' || ext === 'pdf') {
+      fileStatus('Opening the PDF.');
+      const lib = await pdfLib();
+      pdf = await lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise; pdfPage = 1; pdfName = name;
+      await showPdfPage();
+    } else if (type === 'application/json' || ext === 'json') {
+      setPlan(normalizePlan(JSON.parse(await file.text()))); fileStatus(`Loaded the plan saved in ${name}.`);
+    } else if (type.startsWith('text/') || ext === 'txt' || ext === 'md') {
+      const text = (await file.text()).trim().slice(0, 1500);
+      if ($('#askCard').hidden) fileStatus('A written description needs Claude to draw it, and this page can only reach Claude when it is opened in Claude.', true);
+      else { $('#askText').value = text; fileStatus('Put the text in "Describe a home" below. Press "Draw it with Claude" to use it.'); }
+    } else if (/^(dwg|dxf|skp|rvt|ifc|pln)$/.test(ext)) {
+      fileStatus(`This page cannot open CAD files such as .${ext}. In your CAD program, export or print the drawing to PDF and upload that.`, true);
+    } else if (/^(heic|heif|tiff?)$/.test(ext)) {
+      fileStatus(`Browsers cannot show .${ext} images. Save it as JPG or PNG and upload that.`, true);
+    } else if (type.startsWith('image/') || /^(png|jpe?g|webp|gif|bmp|svg|avif)$/.test(ext)) {
+      const img = await loadImage(file); pdf = null;
+      setDrawing(img, img.naturalWidth || 1200, img.naturalHeight || 900, name);
+    } else fileStatus(`This page cannot read ${ext ? '.' + ext + ' files' : 'that file'}. Export the drawing as a PDF, PNG or JPG and upload that.`, true);
+  } catch (e) {
+    fileStatus(e instanceof SyntaxError ? `${name} is not a saved plan. It has to be JSON in the format shown under Plan data.` : e && e.message === 'image' ? `This browser cannot open ${name}. Save it as PNG or JPG and try again.` : e && e.message === 'script' ? 'The PDF reader could not be downloaded. Check the connection, or upload an image instead.' : e instanceof Error && /rooms|JSON object/.test(e.message) ? e.message : `Could not open ${name}. If it is a protected or damaged PDF, export it as an image and upload that.`, true);
+  }
+}
+$('#drop').addEventListener('click', () => $('#fileIn').click());
+$('#fileIn').addEventListener('change', e => { handleFile(e.target.files[0]); e.target.value = ''; });
+for (const el of [$('#drop'), document.querySelector('.pane-plan')]) {
+  el.addEventListener('dragover', e => { e.preventDefault(); el.classList.add('over'); });
+  el.addEventListener('dragleave', () => el.classList.remove('over'));
+  el.addEventListener('drop', e => { e.preventDefault(); el.classList.remove('over'); handleFile(e.dataTransfer.files[0]); });
+}
+document.addEventListener('paste', e => { const f = e.clipboardData && e.clipboardData.files && e.clipboardData.files[0]; if (f) { e.preventDefault(); handleFile(f); } });
+$('#pgPrev').addEventListener('click', () => { if (pdf && pdfPage > 1) { pdfPage--; showPdfPage(); } });
+$('#pgNext').addEventListener('click', () => { if (pdf && pdfPage < pdf.numPages) { pdfPage++; showPdfPage(); } });
+$('#ulOpacity').addEventListener('input', e => { under.opacity = num(e.target.value, 55) / 100; render2D(); });
+$('#ulScale').addEventListener('click', () => {
+  if (calib) { endCalib(); fileStatus(''); render2D(); return; }
+  calib = { pts: [] }; $('#ulScale').textContent = 'Cancel scale';
+  if (state.mode === '3d') setMode('plan');
+  fileStatus('On the drawing, click one end of a length you know, such as a wall with a printed dimension.'); render2D();
+});
+$('#scaleCancel').addEventListener('click', () => { endCalib(); fileStatus(''); render2D(); });
+$('#scaleApply').addEventListener('click', () => {
+  if (!calib || calib.pts.length < 2) return;
+  const [a, c] = calib.pts, d = Math.hypot(c.x - a.x, c.y - a.y), want = num($('#scaleM').value);
+  if (!(want > 0) || d < 1e-6) { fileStatus('Enter a distance in metres greater than zero.', true); return; }
+  const k = want / d;
+  under.x = a.x - (a.x - under.x) * k; under.y = a.y - (a.y - under.y) * k; under.mpp *= k;
+  endCalib(); render2D();
+  fileStatus(`Scale set. The drawing is now ${(under.w * under.mpp).toFixed(2)} m wide.`);
+});
+$('#ulClear').addEventListener('click', () => {
+  const x = snap(under.x) + 1, y = snap(under.y) + 1;
+  setPlan({ name: state.plan.name, plot: null, rooms: [{ id: 'r' + (++uid), name: 'Room 1', type: 'living', x, y, w: 3, h: 3 }] }, false);
+  select(state.plan.rooms[0].id);
+  fileStatus('Rooms cleared. Drag Room 1 onto the first room of the drawing, then add the others.');
+});
+$('#ulRemove').addEventListener('click', () => { under.url = null; under.blob = null; pdf = null; endCalib(); syncFile(); render2D(); fileStatus('Drawing removed. The rooms stay.'); });
 
-Format: {"name": string, "width": number, "depth": number, "layout": NODE}
-NODE is a room {"size": number, "name": string, "type": TYPE}
+// Pull edges that are nearly on the same line onto one line, so traced rooms share walls.
+function alignEdges(raw) {
+  for (const [a, b] of [['x0', 'x1'], ['y0', 'y1']]) {
+    const vals = raw.flatMap(r => [r[a], r[b]]).sort((p, q) => p - q), groups = [];
+    for (const v of vals) { const g = groups[groups.length - 1]; if (g && v - g[0] <= 0.35) g.push(v); else groups.push([v]); }
+    const fix = v => { const g = groups.find(gr => v >= gr[0] - 1e-9 && v <= gr[gr.length - 1] + 1e-9); return g ? snap(g.reduce((s, q) => s + q, 0) / g.length) : snap(v); };
+    raw.forEach(r => { r[a] = fix(r[a]); r[b] = fix(r[b]); });
+  }
+}
+function applyReading(d) {
+  if (!d || typeof d !== 'object' || Array.isArray(d)) throw new Error('unreadable');
+  const hasRooms = Array.isArray(d.rooms) && d.rooms.length > 0, hasPlot = Array.isArray(d.plot) && d.plot.length >= 3;
+  const kind = d.kind === 'floorplan' && hasRooms ? 'floorplan' : d.kind === 'land' && hasPlot ? 'land' : hasRooms ? 'floorplan' : hasPlot ? 'land' : 'other';
+  if (kind === 'other') { const e = new Error('other'); e.reason = typeof d.reason === 'string' ? d.reason.slice(0, 160) : ''; throw e; }
+  const W = clamp(num(d.image_width_m, 12), 2, 500), H = W * under.h / under.w;
+  const fx = v => clamp(num(v), -0.1, 1.1) * W, fy = v => clamp(num(v), -0.1, 1.1) * H;
+  const rooms = []; let plot = null;
+  if (kind === 'floorplan') {
+    const raw = d.rooms.filter(r => r && Array.isArray(r.box) && r.box.length >= 4).slice(0, 24).map(r => {
+      const x0 = fx(r.box[0]), y0 = fy(r.box[1]), x1 = fx(r.box[2]), y1 = fy(r.box[3]);
+      return { name: r.name, type: r.type, x0: Math.min(x0, x1), x1: Math.max(x0, x1), y0: Math.min(y0, y1), y1: Math.max(y0, y1) };
+    });
+    alignEdges(raw);
+    for (const r of raw) rooms.push({ name: r.name, type: r.type, x: r.x0, y: r.y0, w: r.x1 - r.x0, h: r.y1 - r.y0 });
+  } else {
+    plot = d.plot.filter(q => Array.isArray(q) && q.length >= 2).slice(0, 40).map(q => [fx(q[0]), fy(q[1])]);
+    const px0 = Math.min(...plot.map(q => q[0])), px1 = Math.max(...plot.map(q => q[0])), py0 = Math.min(...plot.map(q => q[1])), py1 = Math.max(...plot.map(q => q[1]));
+    const h = d.house;
+    if (h && typeof h === 'object' && h.layout) {
+      const hw = clamp(snap(num(h.width, 10)), 4, 40), hd = clamp(snap(num(h.depth, 8)), 4, 40);
+      const hx = px1 - px0 > hw ? clamp(fx(h.x), px0, px1 - hw) : fx(h.x), hy = py1 - py0 > hd ? clamp(fy(h.y), py0, py1 - hd) : fy(h.y);
+      layoutTree(h.layout, snap(hx), snap(hy), hw, hd, rooms);
+    }
+    if (!rooms.length) { // no usable house came back: centre the largest built-in layout that fits
+      const fit = [...PRESETS].reverse().find(q => q.width + 3 <= px1 - px0 && q.depth + 3 <= py1 - py0) || PRESETS[0];
+      layoutTree(fit.layout, snap((px0 + px1 - fit.width) / 2), snap((py0 + py1 - fit.depth) / 2), fit.width, fit.depth, rooms);
+    }
+  }
+  const plan = normalizePlan({ name: d.name || under.name.replace(/\.[a-z0-9]+$/i, ''), rooms, plot });
+  under.mpp = W / under.w; under.x = -plan.shift.x; under.y = -plan.shift.y;
+  setPlan(plan);
+  return { kind, plan, W };
+}
+
+/* ---------- Claude: draw from a description, read an uploaded drawing ---------- */
+const NODE_RULES = `NODE is a room {"size": number, "name": string, "type": TYPE}
 or a split {"size": number, "dir": "row" | "col", "children": [NODE, ...]}.
 "row" places its children left to right, "col" top to bottom. "size" is the length in metres the node takes along its parent's split direction. The root node fills width x depth, so the home is one rectangle with no gaps.
 TYPE is one of: living, kitchen, dining, bedroom, bathroom, office, hallway, laundry, storage, studio.
 
-Rules:
-- Metres, in steps of 0.25. Match the area asked for; about 70 m2 if none is given.
+Rules for a layout:
+- Metres, in steps of 0.25.
 - Bedrooms at least 2.75 m on the short side, bathrooms at least 1.5 m, hallways 1.1 to 1.6 m wide.
 - Every room must share at least 1 m of wall with a hallway or the living room, so a door fits.
 - Put the kitchen and any dining room next to the living room.
 - One hallway, unless it is a studio. At most 14 rooms. Short plain room names.
 
-Example for a 78 m2 two-bedroom flat:
-{"name":"Two-bedroom flat","width":10,"depth":7.75,"layout":{"dir":"row","children":[{"size":5.5,"dir":"col","children":[{"size":4.5,"name":"Living room","type":"living"},{"size":3.25,"name":"Kitchen","type":"kitchen"}]},{"size":1.25,"name":"Hallway","type":"hallway"},{"size":3.25,"dir":"col","children":[{"size":3.25,"name":"Main bedroom","type":"bedroom"},{"size":1.75,"name":"Bathroom","type":"bathroom"},{"size":2.75,"name":"Bedroom 2","type":"bedroom"}]}]}}
+Example layout for a 78 m2 two-bedroom flat, 10 m wide and 7.75 m deep:
+{"dir":"row","children":[{"size":5.5,"dir":"col","children":[{"size":4.5,"name":"Living room","type":"living"},{"size":3.25,"name":"Kitchen","type":"kitchen"}]},{"size":1.25,"name":"Hallway","type":"hallway"},{"size":3.25,"dir":"col","children":[{"size":3.25,"name":"Main bedroom","type":"bedroom"},{"size":1.75,"name":"Bathroom","type":"bathroom"},{"size":2.75,"name":"Bedroom 2","type":"bedroom"}]}]}`;
+const ASK = `You are laying out a home floor plan for a web tool. Reply with only one JSON object and no other text.
+
+Format: {"name": string, "width": number, "depth": number, "layout": NODE}
+${NODE_RULES}
+
+Match the area asked for; about 70 m2 if none is given.
 
 The home to draw: `;
+const READ = `You are reading an uploaded drawing for a floor plan tool. The image shows either a floor plan of a building, or a piece of land (a plot, site plan or survey with no rooms drawn). Reply with only one JSON object and no other text.
+
+Positions are fractions of the image: x runs from 0 at the left edge to 1 at the right edge, y from 0 at the top edge to 1 at the bottom edge.
+"image_width_m" is the real-world width in metres that the full width of the image covers. Work it out from printed dimensions, a scale bar or a scale note when there is one. Otherwise estimate it from door widths (about 0.9 m), furniture, or typical room and plot sizes. Convert feet and inches to metres.
+
+If it is a floor plan, reply:
+{"kind": "floorplan", "name": string, "image_width_m": number, "rooms": [{"name": string, "type": TYPE, "box": [x0, y0, x1, y1]}]}
+Give one entry per room. "box" is the room's interior as a rectangle, top-left corner then bottom-right corner. Rooms that share a wall must use the same coordinate for that wall. Cover an L-shaped room with two rectangles of the same name. Leave out furniture, dimension text, title blocks, gardens and other outdoor areas. At most 20 rooms.
+TYPE is one of: living, kitchen, dining, bedroom, bathroom, office, hallway, laundry, storage, studio.
+
+If it is land, reply:
+{"kind": "land", "name": string, "image_width_m": number, "plot": [[x, y], ...], "house": {"x": number, "y": number, "width": number, "depth": number, "layout": NODE}}
+"plot" is the boundary of the land, corner by corner, 3 to 12 points. "house" is a home you design to fit inside that boundary: "x" and "y" are the fractions for its top-left corner, "width" and "depth" are in metres. Keep it at least 3 m from the street side and 1.5 m from the other boundaries where the land allows, and cover no more than about 40% of the land.
+${NODE_RULES}
+
+If it is neither, reply: {"kind": "other", "reason": string}
+`;
 const ASK_ERR = {
-  not_granted: 'Claude is not allowed on this page, so drawing from a description is off. The layouts below still work.',
-  sampling_disabled: 'Claude is not available for this account. The layouts below still work.',
+  not_granted: 'Claude is not allowed on this page, so this is off. Everything else still works.',
+  sampling_disabled: 'Claude is not available for this account. Everything else still works.',
   rate_limited: 'Too many requests just now. Wait a minute and try again.',
   session_expired: 'Your session ended. Sign in again, then retry.',
-  refused: 'Claude declined that description. Try describing the rooms and size plainly.',
-  invalid_json: 'Claude answered, but not with a usable plan. Try again, or name the rooms you want.',
-  empty_completion: 'Claude returned nothing. Try a simpler description.',
+  refused: 'Claude declined that request. Try wording it plainly.',
+  invalid_json: 'Claude answered, but not with a usable plan. Try again.',
+  empty_completion: 'Claude returned nothing. Try again with a simpler request.',
+  images_unavailable: 'This view cannot send images to Claude. Set the scale and trace the drawing by hand instead.',
+  image_rejected: 'Claude could not take that image. Try a smaller PNG or JPG.',
 };
 (async () => {
   let sample = null;
   try { sample = window.claude && window.claude.use ? await window.claude.use('sample') : null; } catch (e) { sample = null; }
   if (!sample) return;
-  const card = $('#askCard'), btn = $('#askBtn'), stop = $('#askStop'), st = $('#askStatus'), box = $('#askText');
-  card.hidden = false; let ctl = null;
-  stop.addEventListener('click', () => ctl && ctl.abort());
-  btn.addEventListener('click', async () => {
-    const want = box.value.trim() || box.placeholder;
-    ctl = new AbortController(); btn.disabled = true; stop.hidden = false; st.className = 'status'; st.textContent = 'Thinking. This can take up to a minute.';
-    try {
-      const data = await sample.json(ASK + want.slice(0, 1500), { signal: ctl.signal, cache: false, onText: () => { st.textContent = 'Drawing the layout.'; } });
-      const plan = normalizePlan(data);
-      setPlan(plan); st.textContent = `Drawn: ${plan.rooms.length} rooms. Drag rooms on the plan to adjust.`;
-    } catch (e) {
-      if (e && e.code === 'cancelled') st.textContent = 'Stopped.';
-      else { st.className = 'status err'; st.textContent = (e && ASK_ERR[e.code]) || (e instanceof Error ? 'Claude answered, but the plan could not be read. Try again.' : 'Something went wrong reaching Claude. Try again.'); if (e && (e.code === 'not_granted' || e.code === 'sampling_disabled')) { btn.hidden = true; box.disabled = true; } }
-    } finally { btn.disabled = false; stop.hidden = true; ctl = null; }
+  // one runner for both buttons: thinking state, Stop, and the error copy
+  function wire(btn, stop, st, run) {
+    let ctl = null;
+    stop.addEventListener('click', () => ctl && ctl.abort());
+    btn.addEventListener('click', async () => {
+      ctl = new AbortController(); btn.disabled = true; stop.hidden = false; st('Thinking. This can take a minute or two.');
+      try { await run(ctl.signal); }
+      catch (e) {
+        if (e && e.code === 'cancelled') st('Stopped.');
+        else if (e && e.message === 'other') st(`Claude does not see a floor plan or a piece of land in that file${e.reason ? ': ' + e.reason : '.'}`, true);
+        else {
+          st((e && ASK_ERR[e.code]) || (e instanceof Error ? 'Claude answered, but the plan could not be read. Try again.' : 'Something went wrong reaching Claude. Try again.'), true);
+          if (e && (e.code === 'not_granted' || e.code === 'sampling_disabled')) btn.hidden = true;
+          if (e && e.code === 'images_unavailable') { canSee = false; syncFile(); }
+        }
+      } finally { btn.disabled = false; stop.hidden = true; ctl = null; }
+    });
+  }
+  $('#askCard').hidden = false;
+  const askSt = (t, err) => { const el = $('#askStatus'); el.className = 'status' + (err ? ' err' : ''); el.textContent = t; };
+  wire($('#askBtn'), $('#askStop'), askSt, async signal => {
+    const box = $('#askText'), want = box.value.trim() || box.placeholder;
+    const plan = normalizePlan(await sample.json(ASK + want.slice(0, 1500), { signal, cache: false, onText: () => askSt('Drawing the layout.') }));
+    plan.plot = null; setPlan(plan); askSt(`Drawn: ${plan.rooms.length} rooms. Drag rooms on the plan to adjust.`);
+  });
+  let lim = null; try { lim = await sample.limits(); } catch (e) { lim = null; }
+  canSee = !!(lim && lim.images); syncFile();
+  if (!canSee) return;
+  wire($('#readBtn'), $('#readStop'), fileStatus, async signal => {
+    if (!under.blob) { fileStatus('Upload a drawing first.', true); return; }
+    const mode = $('#readMode').value, note = $('#readNote').value.trim().slice(0, 1000);
+    const prompt = READ + (mode === 'floorplan' ? '\nThe person says this is a floor plan. Trace it.' : mode === 'land' ? '\nThe person says this is land. Design a home on it.' : '') + (note ? `\nNotes from the person: ${note}` : '');
+    const r = applyReading(await sample.json(prompt, { images: under.blob, signal, cache: false, modelTier: 'complex', onText: () => fileStatus('Reading the drawing.') }));
+    fileStatus(r.kind === 'land'
+      ? `Drew the plot (${polyArea(r.plan.plot).toFixed(0)} m²) and a ${r.plan.rooms.length}-room home on it. This is a first draft: check the plot size against your documents, then adjust.`
+      : `Traced ${r.plan.rooms.length} rooms, reading the drawing as ${r.W.toFixed(1)} m wide. This is a first draft: compare it with the drawing underneath and drag rooms to correct it.`);
   });
 })();
 
@@ -939,6 +1211,6 @@ let first = null;
 try { const saved = store.get(); if (saved) first = normalizePlan(saved); } catch (e) { first = null; }
 setMode(window.matchMedia && window.matchMedia('(max-width: 980px)').matches ? '3d' : 'both');
 setPlan(first || normalizePlan(PRESETS[2]));
-window.__roomlines = { state, analyze, furnish, normalizePlan, setPlan, PRESETS };
+window.__roomlines = { state, under, analyze, furnish, normalizePlan, setPlan, applyReading, handleFile, PRESETS };
 })();
 </script>
