@@ -1,0 +1,3 @@
+# Floorcraft session cookies (a login)
+*.cookies
+__pycache__/
