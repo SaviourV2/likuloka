@@ -107,7 +107,9 @@ textarea { resize: vertical; min-height: 68px; }
 .pager .btn { padding: 2px 9px; }
 .stack { display: flex; flex-direction: column; gap: 10px; }
 .field input[type="range"] { padding: 0; accent-color: var(--accent); }
-#plan.calib, #plan.calib .room { cursor: crosshair; }
+.wrap[data-tool^="scaling"] #plan, .wrap[data-tool^="scaling"] #plan .room { cursor: crosshair; }
+[aria-busy="true"] .drop { opacity: .6; }
+.fatal { margin: 0; padding: 10px 12px; border: 1px solid var(--accent); border-radius: 3px; color: var(--accent); background: var(--surface); }
 .zoom { position: absolute; top: 8px; right: 8px; background: var(--surface); font-size: 12px; padding: 4px 9px; }
 .presets { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .presets button { text-align: left; display: flex; flex-direction: column; gap: 1px; padding: 8px 10px; }
@@ -139,6 +141,7 @@ details .inner { display: flex; flex-direction: column; gap: 10px; }
 </style>
 
 <div class="wrap">
+  <p class="fatal" id="fatal" hidden>Part of this page did not load. Check the connection and reload.</p>
   <header class="top">
     <h1 class="mark">Roomlines <span>3D</span></h1>
     <input class="plan-name" id="planName" type="text" maxlength="60" aria-label="Plan name" autocomplete="off">
@@ -220,8 +223,8 @@ details .inner { display: flex; flex-direction: column; gap: 10px; }
         <div class="editor" id="editor" hidden>
           <div class="field wide"><label for="edName">Name</label><input id="edName" type="text" maxlength="40" autocomplete="off"></div>
           <div class="field wide"><label for="edType">Use</label><select id="edType"></select></div>
-          <div class="field"><label for="edW">Width (m)</label><input id="edW" type="number" min="1" max="30" step="0.25" inputmode="decimal"></div>
-          <div class="field"><label for="edH">Depth (m)</label><input id="edH" type="number" min="1" max="30" step="0.25" inputmode="decimal"></div>
+          <div class="field"><label for="edW">Width (m)</label><input id="edW" type="number" min="1" max="40" step="0.25" inputmode="decimal"></div>
+          <div class="field"><label for="edH">Depth (m)</label><input id="edH" type="number" min="1" max="40" step="0.25" inputmode="decimal"></div>
           <div class="field wide"><button type="button" class="btn danger" id="delRoom">Delete room</button></div>
         </div>
         <p>Drag a room on the plan to move it and drag a corner to resize. Rooms that share an edge get a door between them.</p>
@@ -245,11 +248,14 @@ details .inner { display: flex; flex-direction: column; gap: 10px; }
   </main>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/xstate@5.33.3/dist/xstate.umd.min.js"></script>
+<script>window.XState || document.write('<script src="https://unpkg.com/xstate@5.33.3/dist/xstate.umd.min.js"><\/script>');</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 (() => {
 'use strict';
 const $ = s => document.querySelector(s);
+if (typeof XState === 'undefined') { $('#fatal').hidden = false; return; }
 const SNAP = 0.25, EPS = 0.01, WALL_H = 2.6, CUT_H = 1.15;
 const snap = v => Math.round(v / SNAP) * SNAP;
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -613,7 +619,7 @@ const store = { get() { try { return JSON.parse(localStorage.getItem('roomlines.
 const selected = () => state.plan.rooms.find(r => r.id === state.sel) || null;
 // the uploaded drawing: shown under the plan at (x, y) in metres, mpp = metres per image pixel
 const under = { url: null, blob: null, name: '', w: 0, h: 0, x: 0, y: 0, mpp: 0.01, opacity: 0.55 };
-let calib = null;
+const roomById = id => state.plan.rooms.find(r => r.id === id) || null;
 function extent() {
   const b = bounds(state.plan), e = { x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1 };
   const add = (x, y) => { e.x0 = Math.min(e.x0, x); e.y0 = Math.min(e.y0, y); e.x1 = Math.max(e.x1, x); e.y1 = Math.max(e.y1, y); };
@@ -634,10 +640,31 @@ function changed(light) {
   const area = state.plan.rooms.reduce((s, r) => s + r.w * r.h, 0), b = bounds(state.plan);
   $('#stats').textContent = `${state.plan.rooms.length} rooms · ${area.toFixed(1)} m² · ${b.w.toFixed(2)} × ${b.h.toFixed(2)} m`;
   if (document.activeElement !== $('#jsonBox')) $('#jsonBox').value = JSON.stringify(exportPlan(state.plan), null, 1);
-  if (!light) store.set(exportPlan(state.plan));
+  if (!light) { store.set(exportPlan(state.plan)); notify(); }
   if (!pending3d) { pending3d = true; requestAnimationFrame(() => { pending3d = false; view.build(); }); }
 }
-function select(id) { state.sel = id; render2D(); renderList(); syncEditor(true); view.build(); }
+function select(id) { state.sel = id && roomById(id) ? id : null; render2D(); renderList(); syncEditor(true); view.build(); notify(); }
+
+// Every change to the rooms goes through these three, whether it comes from the page or from window.roomlines.
+function addRoom(o = {}) {
+  const b = bounds(state.plan);
+  const r = { id: 'r' + (++uid), name: String(o.name || '').trim().slice(0, 40) || 'New room', type: TYPES[o.type] ? o.type : 'bedroom', x: snap(num(o.x, b.x1)), y: snap(num(o.y, b.y0)), w: clamp(snap(num(o.w, 3)), 1, 40), h: clamp(snap(num(o.h, 3)), 1, 40) };
+  state.plan.rooms.push(r); state.sel = r.id; changed(); syncEditor(true);
+  return r.id;
+}
+function updateRoom(id, patch = {}) {
+  const r = roomById(id); if (!r) return false;
+  if ('name' in patch) r.name = String(patch.name).slice(0, 40) || 'Room';
+  if (TYPES[patch.type]) r.type = patch.type;
+  for (const k of ['x', 'y']) if (k in patch) r[k] = snap(num(patch[k], r[k]));
+  for (const k of ['w', 'h']) if (k in patch) r[k] = clamp(snap(num(patch[k], r[k])), 1, 40);
+  changed(); return true;
+}
+function removeRoom(id) {
+  if (state.plan.rooms.length < 2 || !roomById(id)) return false;
+  state.plan.rooms = state.plan.rooms.filter(r => r.id !== id); if (state.sel === id) state.sel = null;
+  changed(); return true;
+}
 
 /* ---------- 2D plan ---------- */
 const svg = $('#plan');
@@ -710,58 +737,33 @@ function render2D() {
     h += `<rect x="${s.x}" y="${s.y}" width="${s.w}" height="${s.h}" fill="none" stroke="var(--accent)" stroke-width="0.06" pointer-events="none"/>`;
     for (const [k, hx, hy] of [['nw', s.x, s.y], ['ne', s.x + s.w, s.y], ['sw', s.x, s.y + s.h], ['se', s.x + s.w, s.y + s.h]]) h += `<circle class="handle ${k}" data-handle="${k}" cx="${hx}" cy="${hy}" r="${hr}" stroke-width="0.05"/>`;
   }
-  if (calib) {
+  const pts = scalePoints();
+  if (pts.length) {
     const cr = clamp(Math.max(box.w, box.h) / 90, 0.08, 0.3);
-    if (calib.pts.length === 2) h += `<line x1="${calib.pts[0].x}" y1="${calib.pts[0].y}" x2="${calib.pts[1].x}" y2="${calib.pts[1].y}" stroke="var(--accent)" stroke-width="${cr * 0.5}" stroke-dasharray="${cr * 1.5} ${cr}" pointer-events="none"/>`;
-    for (const q of calib.pts) h += `<circle cx="${q.x}" cy="${q.y}" r="${cr}" fill="var(--accent)" stroke="var(--surface)" stroke-width="${cr * 0.3}" pointer-events="none"/>`;
+    if (pts.length === 2) h += `<line x1="${pts[0].x}" y1="${pts[0].y}" x2="${pts[1].x}" y2="${pts[1].y}" stroke="var(--accent)" stroke-width="${cr * 0.5}" stroke-dasharray="${cr * 1.5} ${cr}" pointer-events="none"/>`;
+    for (const q of pts) h += `<circle cx="${q.x}" cy="${q.y}" r="${cr}" fill="var(--accent)" stroke="var(--surface)" stroke-width="${cr * 0.3}" pointer-events="none"/>`;
   }
-  svg.classList.toggle('calib', !!calib);
   dyn.innerHTML = h;
 }
-let drag = null;
 const toPlan = e => { const m = svg.getScreenCTM(); if (!m) return { x: 0, y: 0 }; const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(m.inverse()); return { x: p.x, y: p.y }; };
+// Pointer input only reports what happened; the tool machine decides what it means.
+let activePointer = null;
 svg.addEventListener('pointerdown', e => {
-  if (calib) {
-    e.preventDefault();
-    if (calib.pts.length >= 2) calib.pts = [];
-    calib.pts.push(toPlan(e));
-    if (calib.pts.length === 2) {
-      const [a, c] = calib.pts;
-      $('#scaleForm').hidden = false; $('#scaleM').value = Math.hypot(c.x - a.x, c.y - a.y).toFixed(2);
-      fileStatus('Type the real distance between the two points, then apply.');
-    } else { $('#scaleForm').hidden = true; fileStatus('Now click the other end of that length.'); }
-    render2D(); return;
-  }
+  if (tool.getSnapshot().matches('scaling')) { e.preventDefault(); tool.send({ type: 'PLAN.PRESS', at: toPlan(e) }); return; }
   const hEl = e.target.closest('[data-handle]'), rEl = e.target.closest('[data-room]');
   if (!hEl && !rEl) { if (state.sel) select(null); return; }
   if (rEl && rEl.dataset.room !== state.sel) select(rEl.dataset.room);
   const r = selected(); if (!r) return;
-  e.preventDefault();
-  const vb = svg.viewBox.baseVal; frozenBox = { x: vb.x, y: vb.y, w: vb.width, h: vb.height };
-  drag = { id: e.pointerId, handle: hEl ? hEl.dataset.handle : null, start: toPlan(e), o: { x: r.x, y: r.y, w: r.w, h: r.h } };
+  e.preventDefault(); activePointer = e.pointerId;
+  tool.send({ type: hEl ? 'HANDLE.PRESS' : 'ROOM.PRESS', roomId: r.id, handle: hEl ? hEl.dataset.handle : null, at: toPlan(e) });
   try { svg.setPointerCapture(e.pointerId); } catch (err) {}
 });
-svg.addEventListener('pointermove', e => {
-  if (!drag || e.pointerId !== drag.id) return;
-  const r = selected(); if (!r) return;
-  const p = toPlan(e), dx = snap(p.x - drag.start.x), dy = snap(p.y - drag.start.y), o = drag.o;
-  let { x, y, w, h } = o;
-  if (!drag.handle) { x = o.x + dx; y = o.y + dy; }
-  else {
-    if (drag.handle.includes('e')) w = Math.max(1, o.w + dx);
-    if (drag.handle.includes('s')) h = Math.max(1, o.h + dy);
-    if (drag.handle.includes('w')) { w = Math.max(1, o.w - dx); x = o.x + o.w - w; }
-    if (drag.handle.includes('n')) { h = Math.max(1, o.h - dy); y = o.y + o.h - h; }
-  }
-  if (x === r.x && y === r.y && w === r.w && h === r.h) return;
-  Object.assign(r, { x, y, w, h }); changed(true);
+svg.addEventListener('pointermove', e => { if (e.pointerId === activePointer) tool.send({ type: 'POINTER.MOVE', at: toPlan(e) }); });
+for (const type of ['pointerup', 'pointercancel']) svg.addEventListener(type, e => {
+  if (e.pointerId !== activePointer) return;
+  activePointer = null; tool.send({ type: type === 'pointerup' ? 'POINTER.UP' : 'CANCEL' });
 });
-const endDrag = e => {
-  if (!drag || e.pointerId !== drag.id) return;
-  drag = null; frozenBox = null;
-  changed();
-};
-svg.addEventListener('pointerup', endDrag); svg.addEventListener('pointercancel', endDrag);
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !tool.getSnapshot().matches('idle')) { activePointer = null; tool.send({ type: 'CANCEL' }); } });
 
 /* ---------- side panel ---------- */
 function renderList() {
@@ -774,17 +776,11 @@ function syncEditor(force) {
   const set = (id, v) => { const el = $(id); if (force || document.activeElement !== el) el.value = v; };
   set('#edName', r.name); set('#edType', r.type); set('#edW', r.w); set('#edH', r.h);
 }
-$('#edName').addEventListener('input', e => { const r = selected(); if (r) { r.name = e.target.value.slice(0, 40) || 'Room'; changed(); } });
-$('#edType').addEventListener('change', e => { const r = selected(); if (r && TYPES[e.target.value]) { r.type = e.target.value; changed(); } });
-for (const [id, key] of [['#edW', 'w'], ['#edH', 'h']]) $(id).addEventListener('change', e => { const r = selected(); if (r) { r[key] = clamp(snap(num(e.target.value, r[key])), 1, 30); e.target.value = r[key]; changed(); } });
-$('#delRoom').addEventListener('click', () => {
-  if (state.plan.rooms.length < 2) return;
-  state.plan.rooms = state.plan.rooms.filter(r => r.id !== state.sel); state.sel = null; changed();
-});
-$('#addRoom').addEventListener('click', () => {
-  const b = bounds(state.plan), r = { id: 'r' + (++uid), name: 'New room', type: 'bedroom', x: b.x1, y: b.y0, w: 3, h: 3 };
-  state.plan.rooms.push(r); state.sel = r.id; changed(); syncEditor(true); view.fit();
-});
+$('#edName').addEventListener('input', e => { if (state.sel) updateRoom(state.sel, { name: e.target.value }); });
+$('#edType').addEventListener('change', e => { if (state.sel) updateRoom(state.sel, { type: e.target.value }); });
+for (const [id, key] of [['#edW', 'w'], ['#edH', 'h']]) $(id).addEventListener('change', e => { const r = selected(); if (r) { updateRoom(r.id, { [key]: e.target.value }); e.target.value = r[key]; } });
+$('#delRoom').addEventListener('click', () => { if (state.sel) removeRoom(state.sel); });
+$('#addRoom').addEventListener('click', () => { addRoom(); view.fit(); });
 $('#planName').addEventListener('input', e => { state.plan.name = e.target.value.slice(0, 60) || 'Untitled home'; store.set(exportPlan(state.plan)); if (document.activeElement !== $('#jsonBox')) $('#jsonBox').value = JSON.stringify(exportPlan(state.plan), null, 1); });
 $('#presets').innerHTML = PRESETS.map((p, i) => `<button type="button" class="btn" data-preset="${i}"><span>${p.name}</span><small>${(p.width * p.depth).toFixed(0)} m² · ${p.width} × ${p.depth} m</small></button>`).join('');
 $('#presets').addEventListener('click', e => { const b = e.target.closest('[data-preset]'); if (b) setPlan(normalizePlan(PRESETS[+b.dataset.preset])); });
@@ -985,61 +981,61 @@ const view = (() => {
 /* ---------- uploaded drawing ---------- */
 const PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
 function fileStatus(t, err) { const el = $('#fileStatus'); el.className = 'status' + (err ? ' err' : ''); el.textContent = t; }
-const loadScript = src => new Promise((ok, no) => { const el = document.createElement('script'); el.src = src; el.onload = ok; el.onerror = () => no(new Error('script')); document.head.appendChild(el); });
-async function pdfLib() { if (!window.pdfjsLib) { await loadScript(PDFJS + 'pdf.min.js'); await loadScript(PDFJS + 'pdf.worker.min.js'); } return window.pdfjsLib; }
-let pdf = null, pdfPage = 1, pdfName = '', canSee = false;
-function syncFile() {
-  $('#fileLoaded').hidden = !under.url; if (!under.url) return;
-  $('#thumb').src = under.url; $('#fileName').textContent = under.name;
-  $('#pager').hidden = !(pdf && pdf.numPages > 1); if (pdf) $('#pgLabel').textContent = `Page ${pdfPage} of ${pdf.numPages}`;
-  $('#readBox').hidden = !canSee;
+const loadScript = src => new Promise((ok, no) => { const el = document.createElement('script'); el.src = src; el.onload = ok; el.onerror = () => { el.remove(); no(new Error('script')); }; document.head.appendChild(el); });
+let pdfLibLoading = null; // one download however many PDFs arrive; cleared on failure so a retry can work
+function pdfLib() {
+  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if (!pdfLibLoading) pdfLibLoading = loadScript(PDFJS + 'pdf.min.js').then(() => loadScript(PDFJS + 'pdf.worker.min.js')).then(() => window.pdfjsLib).catch(e => { pdfLibLoading = null; throw e; });
+  return pdfLibLoading;
 }
-function endCalib() { calib = null; $('#scaleForm').hidden = true; $('#ulScale').textContent = 'Set scale'; }
-function setDrawing(src, sw, sh, name) {
+// Any picture source becomes one JPEG the page can show (url) and send to Claude (blob).
+function rasterize(src, sw, sh) {
   const k = Math.min(1, 1800 / Math.max(sw, sh)), c = document.createElement('canvas');
   c.width = Math.max(1, Math.round(sw * k)); c.height = Math.max(1, Math.round(sh * k));
   const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(src, 0, 0, c.width, c.height);
-  const b = bounds(state.plan);
-  Object.assign(under, { url: c.toDataURL('image/jpeg', 0.88), blob: null, name, w: c.width, h: c.height, x: b.x0, y: b.y0, mpp: Math.max(12, b.w) / c.width });
-  c.toBlob(bl => { under.blob = bl; }, 'image/jpeg', 0.9);
-  endCalib(); syncFile(); render2D();
-  if (state.mode === '3d') setMode('plan');
-  fileStatus(canSee ? 'Drawing loaded under the plan. Let Claude read it, or set the scale and draw the rooms over it.' : 'Drawing loaded under the plan at a guessed size. Set the scale, then draw the rooms over it.');
+  return new Promise((ok, no) => c.toBlob(blob => blob ? ok({ url: c.toDataURL('image/jpeg', 0.88), blob, w: c.width, h: c.height }) : no(new Error('image')), 'image/jpeg', 0.9));
 }
-async function showPdfPage() {
-  const page = await pdf.getPage(pdfPage), v1 = page.getViewport({ scale: 1 });
+async function renderPdfPage(doc, n) {
+  const page = await doc.getPage(n), v1 = page.getViewport({ scale: 1 });
   const vp = page.getViewport({ scale: clamp(1800 / Math.max(v1.width, v1.height), 0.5, 4) }), c = document.createElement('canvas');
   c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
   await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
-  setDrawing(c, c.width, c.height, pdf.numPages > 1 ? `${pdfName}, page ${pdfPage}` : pdfName);
+  return rasterize(c, c.width, c.height);
 }
 const loadImage = file => new Promise((ok, no) => { const url = URL.createObjectURL(file), img = new Image(); img.onload = () => { ok(img); URL.revokeObjectURL(url); }; img.onerror = () => { no(new Error('image')); URL.revokeObjectURL(url); }; img.src = url; });
+function fileKind(file) {
+  const name = file.name || '', ext = (name.includes('.') ? name.split('.').pop() : '').toLowerCase(), type = file.type || '';
+  if (type === 'application/pdf' || ext === 'pdf') return 'pdf';
+  if (type === 'application/json' || ext === 'json') return 'plan';
+  if (type.startsWith('text/') || ext === 'txt' || ext === 'md') return 'text';
+  if (/^(dwg|dxf|skp|rvt|ifc|pln)$/.test(ext)) return 'cad';
+  if (/^(heic|heif|tiff?)$/.test(ext)) return 'rawimage';
+  if (type.startsWith('image/') || /^(png|jpe?g|webp|gif|bmp|svg|avif)$/.test(ext)) return 'image';
+  return 'unknown';
+}
 async function handleFile(file) {
   if (!file) return;
-  const name = file.name || 'Pasted image', ext = (name.includes('.') ? name.split('.').pop() : '').toLowerCase(), type = file.type || '';
+  const name = file.name || 'Pasted image', ext = (name.includes('.') ? name.split('.').pop() : '').toLowerCase(), kind = fileKind(file);
+  if (kind === 'pdf' || kind === 'image') { drawing.send({ type: 'FILE', file, kind, name }); return; }
+  if (kind === 'cad') { fileStatus(`This page cannot open CAD files such as .${ext}. In your CAD program, export or print the drawing to PDF and upload that.`, true); return; }
+  if (kind === 'rawimage') { fileStatus(`Browsers cannot show .${ext} images. Save it as JPG or PNG and upload that.`, true); return; }
+  if (kind === 'unknown') { fileStatus(`This page cannot read ${ext ? '.' + ext + ' files' : 'that file'}. Export the drawing as a PDF, PNG or JPG and upload that.`, true); return; }
   try {
-    if (type === 'application/pdf' || ext === 'pdf') {
-      fileStatus('Opening the PDF.');
-      const lib = await pdfLib();
-      pdf = await lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise; pdfPage = 1; pdfName = name;
-      await showPdfPage();
-    } else if (type === 'application/json' || ext === 'json') {
-      setPlan(normalizePlan(JSON.parse(await file.text()))); fileStatus(`Loaded the plan saved in ${name}.`);
-    } else if (type.startsWith('text/') || ext === 'txt' || ext === 'md') {
-      const text = (await file.text()).trim().slice(0, 1500);
-      if ($('#askCard').hidden) fileStatus('A written description needs Claude to draw it, and this page can only reach Claude when it is opened in Claude.', true);
-      else { $('#askText').value = text; fileStatus('Put the text in "Describe a home" below. Press "Draw it with Claude" to use it.'); }
-    } else if (/^(dwg|dxf|skp|rvt|ifc|pln)$/.test(ext)) {
-      fileStatus(`This page cannot open CAD files such as .${ext}. In your CAD program, export or print the drawing to PDF and upload that.`, true);
-    } else if (/^(heic|heif|tiff?)$/.test(ext)) {
-      fileStatus(`Browsers cannot show .${ext} images. Save it as JPG or PNG and upload that.`, true);
-    } else if (type.startsWith('image/') || /^(png|jpe?g|webp|gif|bmp|svg|avif)$/.test(ext)) {
-      const img = await loadImage(file); pdf = null;
-      setDrawing(img, img.naturalWidth || 1200, img.naturalHeight || 900, name);
-    } else fileStatus(`This page cannot read ${ext ? '.' + ext + ' files' : 'that file'}. Export the drawing as a PDF, PNG or JPG and upload that.`, true);
+    const text = await file.text();
+    if (kind === 'plan') { setPlan(normalizePlan(JSON.parse(text))); fileStatus(`Loaded the plan saved in ${name}.`); }
+    else if (describe.getSnapshot().matches('unavailable')) fileStatus('A written description needs Claude to draw it, and this page can only reach Claude when it is opened in Claude.', true);
+    else { $('#askText').value = text.trim().slice(0, 1500); fileStatus('Put the text in "Describe a home" below. Press "Draw it with Claude" to use it.'); }
   } catch (e) {
-    fileStatus(e instanceof SyntaxError ? `${name} is not a saved plan. It has to be JSON in the format shown under Plan data.` : e && e.message === 'image' ? `This browser cannot open ${name}. Save it as PNG or JPG and try again.` : e && e.message === 'script' ? 'The PDF reader could not be downloaded. Check the connection, or upload an image instead.' : e instanceof Error && /rooms|JSON object/.test(e.message) ? e.message : `Could not open ${name}. If it is a protected or damaged PDF, export it as an image and upload that.`, true);
+    fileStatus(e instanceof SyntaxError ? `${name} is not a saved plan. It has to be JSON in the format shown under Plan data.` : e instanceof Error && /rooms|JSON object/.test(e.message) ? e.message : `Could not open ${name}.`, true);
   }
+}
+function syncFile() {
+  const s = drawing.getSnapshot(), c = s.context;
+  $('#fileCard').setAttribute('aria-busy', String(s.matches('opening') || s.matches('turning')));
+  $('#fileLoaded').hidden = !under.url; if (!under.url) return;
+  $('#thumb').src = under.url; $('#fileName').textContent = under.name;
+  $('#pager').hidden = !(c.pages > 1); $('#pgLabel').textContent = `Page ${c.page} of ${c.pages}`;
+  $('#pgPrev').disabled = c.page <= 1; $('#pgNext').disabled = c.page >= c.pages;
 }
 $('#drop').addEventListener('click', () => $('#fileIn').click());
 $('#fileIn').addEventListener('change', e => { handleFile(e.target.files[0]); e.target.value = ''; });
@@ -1049,32 +1045,23 @@ for (const el of [$('#drop'), document.querySelector('.pane-plan')]) {
   el.addEventListener('drop', e => { e.preventDefault(); el.classList.remove('over'); handleFile(e.dataTransfer.files[0]); });
 }
 document.addEventListener('paste', e => { const f = e.clipboardData && e.clipboardData.files && e.clipboardData.files[0]; if (f) { e.preventDefault(); handleFile(f); } });
-$('#pgPrev').addEventListener('click', () => { if (pdf && pdfPage > 1) { pdfPage--; showPdfPage(); } });
-$('#pgNext').addEventListener('click', () => { if (pdf && pdfPage < pdf.numPages) { pdfPage++; showPdfPage(); } });
+$('#pgPrev').addEventListener('click', () => drawing.send({ type: 'PAGE.PREV' }));
+$('#pgNext').addEventListener('click', () => drawing.send({ type: 'PAGE.NEXT' }));
 $('#ulOpacity').addEventListener('input', e => { under.opacity = num(e.target.value, 55) / 100; render2D(); });
 $('#ulScale').addEventListener('click', () => {
-  if (calib) { endCalib(); fileStatus(''); render2D(); return; }
-  calib = { pts: [] }; $('#ulScale').textContent = 'Cancel scale';
+  if (tool.getSnapshot().matches('scaling')) { tool.send({ type: 'SCALE.CANCEL' }); return; }
   if (state.mode === '3d') setMode('plan');
-  fileStatus('On the drawing, click one end of a length you know, such as a wall with a printed dimension.'); render2D();
+  tool.send({ type: 'SCALE.START' });
 });
-$('#scaleCancel').addEventListener('click', () => { endCalib(); fileStatus(''); render2D(); });
-$('#scaleApply').addEventListener('click', () => {
-  if (!calib || calib.pts.length < 2) return;
-  const [a, c] = calib.pts, d = Math.hypot(c.x - a.x, c.y - a.y), want = num($('#scaleM').value);
-  if (!(want > 0) || d < 1e-6) { fileStatus('Enter a distance in metres greater than zero.', true); return; }
-  const k = want / d;
-  under.x = a.x - (a.x - under.x) * k; under.y = a.y - (a.y - under.y) * k; under.mpp *= k;
-  endCalib(); render2D();
-  fileStatus(`Scale set. The drawing is now ${(under.w * under.mpp).toFixed(2)} m wide.`);
-});
+$('#scaleCancel').addEventListener('click', () => tool.send({ type: 'SCALE.CANCEL' }));
+$('#scaleApply').addEventListener('click', () => tool.send({ type: 'SCALE.APPLY', metres: $('#scaleM').value }));
 $('#ulClear').addEventListener('click', () => {
   const x = snap(under.x) + 1, y = snap(under.y) + 1;
   setPlan({ name: state.plan.name, plot: null, rooms: [{ id: 'r' + (++uid), name: 'Room 1', type: 'living', x, y, w: 3, h: 3 }] }, false);
   select(state.plan.rooms[0].id);
   fileStatus('Rooms cleared. Drag Room 1 onto the first room of the drawing, then add the others.');
 });
-$('#ulRemove').addEventListener('click', () => { under.url = null; under.blob = null; pdf = null; endCalib(); syncFile(); render2D(); fileStatus('Drawing removed. The rooms stay.'); });
+$('#ulRemove').addEventListener('click', () => drawing.send({ type: 'REMOVE' }));
 
 // Pull edges that are nearly on the same line onto one line, so traced rooms share walls.
 function alignEdges(raw) {
@@ -1171,47 +1158,268 @@ const ASK_ERR = {
   images_unavailable: 'This view cannot send images to Claude. Set the scale and trace the drawing by hand instead.',
   image_rejected: 'Claude could not take that image. Try a smaller PNG or JPG.',
 };
-(async () => {
-  let sample = null;
-  try { sample = window.claude && window.claude.use ? await window.claude.use('sample') : null; } catch (e) { sample = null; }
-  if (!sample) return;
-  // one runner for both buttons: thinking state, Stop, and the error copy
-  function wire(btn, stop, st, run) {
-    let ctl = null;
-    stop.addEventListener('click', () => ctl && ctl.abort());
-    btn.addEventListener('click', async () => {
-      ctl = new AbortController(); btn.disabled = true; stop.hidden = false; st('Thinking. This can take a minute or two.');
-      try { await run(ctl.signal); }
-      catch (e) {
-        if (e && e.code === 'cancelled') st('Stopped.');
-        else if (e && e.message === 'other') st(`Claude does not see a floor plan or a piece of land in that file${e.reason ? ': ' + e.reason : '.'}`, true);
-        else {
-          st((e && ASK_ERR[e.code]) || (e instanceof Error ? 'Claude answered, but the plan could not be read. Try again.' : 'Something went wrong reaching Claude. Try again.'), true);
-          if (e && (e.code === 'not_granted' || e.code === 'sampling_disabled')) btn.hidden = true;
-          if (e && e.code === 'images_unavailable') { canSee = false; syncFile(); }
-        }
-      } finally { btn.disabled = false; stop.hidden = true; ctl = null; }
-    });
-  }
-  $('#askCard').hidden = false;
-  const askSt = (t, err) => { const el = $('#askStatus'); el.className = 'status' + (err ? ' err' : ''); el.textContent = t; };
-  wire($('#askBtn'), $('#askStop'), askSt, async signal => {
-    const box = $('#askText'), want = box.value.trim() || box.placeholder;
-    const plan = normalizePlan(await sample.json(ASK + want.slice(0, 1500), { signal, cache: false, onText: () => askSt('Drawing the layout.') }));
-    plan.plot = null; setPlan(plan); askSt(`Drawn: ${plan.rooms.length} rooms. Drag rooms on the plan to adjust.`);
+function explain(e) {
+  if (e && e.message === 'other') return `Claude does not see a floor plan or a piece of land in that file${e.reason ? ': ' + e.reason : '.'}`;
+  return (e && ASK_ERR[e.code]) || (e instanceof Error ? 'Claude answered, but the plan could not be read. Try again.' : 'Something went wrong reaching Claude. Try again.');
+}
+
+/* ---------- state machines (XState) ----------
+   Each multi-step flow is one machine, so a step that should be impossible cannot happen.
+   Plan data stays in `state.plan` and `under`; a machine only records which step its flow is in.
+   The current step of every machine is mirrored on .wrap as data-tool, data-drawing, data-describe, data-read. */
+const { setup, createActor, assign, fromPromise } = XState;
+
+// tool: what the pointer is doing on the 2D plan
+const toolMachine = setup({
+  guards: {
+    roomExists: ({ event }) => !!roomById(event.roomId),
+    hasDrawing: () => !!under.url,
+    canApply: ({ context, event }) => context.pts.length === 2 && num(event.metres) > 0 && Math.hypot(context.pts[1].x - context.pts[0].x, context.pts[1].y - context.pts[0].y) > 1e-6,
+  },
+  actions: {
+    grab: assign(({ event }) => { const r = roomById(event.roomId); return { roomId: r.id, handle: event.handle || null, start: event.at, origin: { x: r.x, y: r.y, w: r.w, h: r.h } }; }),
+    freezeView: () => { const vb = svg.viewBox.baseVal; frozenBox = { x: vb.x, y: vb.y, w: vb.width, h: vb.height }; },
+    dragTo: ({ context, event }) => {
+      const r = roomById(context.roomId); if (!r) return;
+      const dx = snap(event.at.x - context.start.x), dy = snap(event.at.y - context.start.y), o = context.origin, hd = context.handle;
+      let { x, y, w, h } = o;
+      if (!hd) { x = o.x + dx; y = o.y + dy; }
+      else {
+        if (hd.includes('e')) w = Math.max(1, o.w + dx);
+        if (hd.includes('s')) h = Math.max(1, o.h + dy);
+        if (hd.includes('w')) { w = Math.max(1, o.w - dx); x = o.x + o.w - w; }
+        if (hd.includes('n')) { h = Math.max(1, o.h - dy); y = o.y + o.h - h; }
+      }
+      if (x === r.x && y === r.y && w === r.w && h === r.h) return;
+      Object.assign(r, { x, y, w, h }); changed(true);
+    },
+    revert: ({ context }) => { const r = roomById(context.roomId); if (r) Object.assign(r, context.origin); },
+    release: () => { frozenBox = null; changed(); },
+    clearPts: assign({ pts: [] }),
+    addPt: assign({ pts: ({ context, event }) => [...context.pts, event.at] }),
+    restartPts: assign({ pts: ({ event }) => [event.at] }),
+    hintFirst: () => fileStatus('On the drawing, click one end of a length you know, such as a wall with a printed dimension.'),
+    hintSecond: () => fileStatus('Now click the other end of that length.'),
+    hintDistance: ({ context }) => { const [a, c] = context.pts; $('#scaleM').value = Math.hypot(c.x - a.x, c.y - a.y).toFixed(2); fileStatus('Type the real distance between the two points, then apply.'); },
+    hintBadDistance: () => fileStatus('Enter a distance in metres greater than zero.', true),
+    clearHint: () => fileStatus(''),
+    applyScale: ({ context, event }) => {
+      const [a, c] = context.pts, k = num(event.metres) / Math.hypot(c.x - a.x, c.y - a.y);
+      under.x = a.x - (a.x - under.x) * k; under.y = a.y - (a.y - under.y) * k; under.mpp *= k;
+      fileStatus(`Scale set. The drawing is now ${(under.w * under.mpp).toFixed(2)} m wide.`);
+    },
+  },
+}).createMachine({
+  id: 'tool', initial: 'idle',
+  context: { roomId: null, handle: null, start: null, origin: null, pts: [] },
+  states: {
+    idle: { on: {
+      'ROOM.PRESS': { target: 'moving', guard: 'roomExists', actions: ['freezeView', 'grab'] },
+      'HANDLE.PRESS': { target: 'resizing', guard: 'roomExists', actions: ['freezeView', 'grab'] },
+      'SCALE.START': { target: 'scaling', guard: 'hasDrawing' },
+    } },
+    moving: { on: { 'POINTER.MOVE': { actions: 'dragTo' }, 'POINTER.UP': { target: 'idle', actions: 'release' }, CANCEL: { target: 'idle', actions: ['revert', 'release'] } } },
+    resizing: { on: { 'POINTER.MOVE': { actions: 'dragTo' }, 'POINTER.UP': { target: 'idle', actions: 'release' }, CANCEL: { target: 'idle', actions: ['revert', 'release'] } } },
+    scaling: {
+      initial: 'first', entry: 'clearPts',
+      on: { 'SCALE.CANCEL': { target: 'idle', actions: 'clearHint' }, CANCEL: { target: 'idle', actions: 'clearHint' }, 'DRAWING.CHANGED': 'idle', 'DRAWING.REMOVED': 'idle' },
+      states: {
+        first: { entry: 'hintFirst', on: { 'PLAN.PRESS': { target: 'second', actions: 'addPt' } } },
+        second: { entry: 'hintSecond', on: { 'PLAN.PRESS': { target: 'distance', actions: 'addPt' } } },
+        distance: { entry: 'hintDistance', on: {
+          'PLAN.PRESS': { target: 'second', actions: 'restartPts' },
+          'SCALE.APPLY': [{ target: '#tool.idle', guard: 'canApply', actions: 'applyScale' }, { actions: 'hintBadDistance' }],
+        } },
+      },
+    },
+  },
+});
+
+// drawing: the uploaded image or PDF. Leaving `opening` or `turning` drops that step's result, so a slow file can never land on top of a newer one.
+const drawingMachine = setup({
+  actors: {
+    open: fromPromise(async ({ input }) => {
+      if (input.kind === 'pdf') { const lib = await pdfLib(), pdf = await lib.getDocument({ data: new Uint8Array(await input.file.arrayBuffer()) }).promise; return { pdf, pages: pdf.numPages, page: 1, name: input.name, pic: await renderPdfPage(pdf, 1) }; }
+      const img = await loadImage(input.file);
+      return { pdf: null, pages: 1, page: 1, name: input.name, pic: await rasterize(img, img.naturalWidth || 1200, img.naturalHeight || 900) };
+    }),
+    turn: fromPromise(async ({ input }) => ({ pic: await renderPdfPage(input.pdf, input.page) })),
+  },
+  guards: { hasDrawing: () => !!under.url, hasNext: ({ context }) => !!context.pdf && context.page < context.pages, hasPrev: ({ context }) => !!context.pdf && context.page > 1 },
+  actions: {
+    queue: assign({ pending: ({ event }) => ({ file: event.file, kind: event.kind, name: event.name }) }),
+    sayOpening: ({ context }) => fileStatus(context.pending.kind === 'pdf' ? 'Opening the PDF.' : 'Opening the image.'),
+    adopt: assign(({ event }) => ({ pdf: event.output.pdf, pages: event.output.pages, page: event.output.page, name: event.output.name, pending: null })),
+    nextPage: assign({ page: ({ context }) => context.page + 1 }),
+    prevPage: assign({ page: ({ context }) => context.page - 1 }),
+    show: ({ context, event }) => {
+      const pic = event.output.pic, b = bounds(state.plan);
+      Object.assign(under, { url: pic.url, blob: pic.blob, w: pic.w, h: pic.h, x: b.x0, y: b.y0, mpp: Math.max(12, b.w) / pic.w, name: context.pages > 1 ? `${context.name}, page ${context.page}` : context.name });
+      tool.send({ type: 'DRAWING.CHANGED' }); read.send({ type: 'DRAWING.CHANGED' });
+      if (state.mode === '3d') setMode('plan');
+      render2D();
+      fileStatus(read.getSnapshot().matches('unavailable') ? 'Drawing loaded under the plan at a guessed size. Set the scale, then draw the rooms over it.' : 'Drawing loaded under the plan. Let Claude read it, or set the scale and draw the rooms over it.');
+    },
+    forget: assign({ pdf: null, pages: 0, page: 0, name: '', pending: null }),
+    hide: () => {
+      under.url = null; under.blob = null;
+      tool.send({ type: 'DRAWING.REMOVED' }); read.send({ type: 'DRAWING.CHANGED' });
+      render2D(); fileStatus('Drawing removed. The rooms stay.');
+    },
+    openFailed: ({ context, event }) => {
+      const name = context.pending ? context.pending.name : 'that file', m = event.error && event.error.message;
+      fileStatus(m === 'image' ? `This browser cannot open ${name}. Save it as PNG or JPG and try again.` : m === 'script' ? 'The PDF reader could not be downloaded. Check the connection, or upload an image instead.' : `Could not open ${name}. If it is a protected or damaged PDF, export it as an image and upload that.`, true);
+    },
+    turnFailed: () => fileStatus('That page could not be drawn. Try another page.', true),
+  },
+}).createMachine({
+  id: 'drawing', initial: 'empty',
+  context: { pdf: null, pages: 0, page: 0, name: '', pending: null },
+  states: {
+    empty: { on: { FILE: { target: 'opening', actions: 'queue' } } },
+    opening: { entry: 'sayOpening', on: { FILE: { target: 'opening', reenter: true, actions: 'queue' } }, invoke: { src: 'open', input: ({ context }) => context.pending,
+      onDone: { target: 'ready', actions: ['adopt', 'show'] },
+      onError: [{ target: 'ready', guard: 'hasDrawing', actions: 'openFailed' }, { target: 'empty', actions: 'openFailed' }] } },
+    ready: { on: {
+      FILE: { target: 'opening', actions: 'queue' },
+      'PAGE.NEXT': { target: 'turning', guard: 'hasNext', actions: 'nextPage' },
+      'PAGE.PREV': { target: 'turning', guard: 'hasPrev', actions: 'prevPage' },
+      REMOVE: { target: 'empty', actions: ['forget', 'hide'] },
+    } },
+    turning: { invoke: { src: 'turn', input: ({ context }) => ({ pdf: context.pdf, page: context.page }),
+      onDone: { target: 'ready', actions: 'show' }, onError: { target: 'ready', actions: 'turnFailed' } },
+      on: {
+        'PAGE.NEXT': { target: 'turning', reenter: true, guard: 'hasNext', actions: 'nextPage' },
+        'PAGE.PREV': { target: 'turning', reenter: true, guard: 'hasPrev', actions: 'prevPage' },
+        FILE: { target: 'opening', actions: 'queue' },
+        REMOVE: { target: 'empty', actions: ['forget', 'hide'] },
+      } },
+  },
+});
+
+// describe / read: one request to Claude. Leaving `working` aborts the request and drops its answer.
+let sample = null;
+function claudeTask(id, o) {
+  return setup({
+    actors: { run: fromPromise(async ({ signal }) => { const data = await o.request(signal); if (signal.aborted) throw { code: 'cancelled' }; return o.apply(data); }) },
+    guards: {
+      ready: () => !o.ready || o.ready(),
+      blocked: ({ event }) => !!event.error && (event.error.code === 'not_granted' || event.error.code === 'sampling_disabled'),
+      noImages: ({ event }) => !!event.error && event.error.code === 'images_unavailable',
+    },
+    actions: {
+      sayThinking: () => o.say('Thinking. This can take a minute or two.'),
+      sayWriting: () => o.say(o.writing),
+      sayDone: ({ event }) => o.say(event.output),
+      sayStopped: () => o.say('Stopped.'),
+      sayNotReady: () => o.say(o.notReady, true),
+      sayFailed: ({ event }) => o.say(explain(event.error), true),
+    },
+  }).createMachine({
+    id, initial: 'unavailable',
+    states: {
+      unavailable: { on: { AVAILABLE: 'idle' } },
+      idle: { on: { RUN: [{ target: 'working', guard: 'ready' }, { actions: 'sayNotReady' }] } },
+      working: {
+        initial: 'thinking',
+        invoke: { src: 'run', onDone: { target: 'idle', actions: 'sayDone' },
+          onError: [{ target: 'blocked', guard: 'blocked', actions: 'sayFailed' }, { target: 'unavailable', guard: 'noImages', actions: 'sayFailed' }, { target: 'idle', actions: 'sayFailed' }] },
+        on: { STOP: { target: 'idle', actions: 'sayStopped' }, 'DRAWING.CHANGED': { target: 'idle', actions: 'sayStopped' } },
+        states: { thinking: { entry: 'sayThinking', on: { TEXT: 'writing' } }, writing: { entry: 'sayWriting' } },
+      },
+      blocked: {},
+    },
   });
-  let lim = null; try { lim = await sample.limits(); } catch (e) { lim = null; }
-  canSee = !!(lim && lim.images); syncFile();
-  if (!canSee) return;
-  wire($('#readBtn'), $('#readStop'), fileStatus, async signal => {
-    if (!under.blob) { fileStatus('Upload a drawing first.', true); return; }
+}
+const askSay = (t, err) => { const el = $('#askStatus'); el.className = 'status' + (err ? ' err' : ''); el.textContent = t; };
+const tool = createActor(toolMachine), drawing = createActor(drawingMachine);
+const describe = createActor(claudeTask('describe', {
+  say: askSay, writing: 'Drawing the layout.',
+  request: signal => { const box = $('#askText'), want = box.value.trim() || box.placeholder; return sample.json(ASK + want.slice(0, 1500), { signal, cache: false, onText: () => describe.send({ type: 'TEXT' }) }); },
+  apply: data => { const plan = normalizePlan(data); plan.plot = null; setPlan(plan); return `Drawn: ${plan.rooms.length} rooms. Drag rooms on the plan to adjust.`; },
+}));
+const read = createActor(claudeTask('read', {
+  say: fileStatus, writing: 'Reading the drawing.', notReady: 'Upload a drawing first, and wait until it shows under the plan.',
+  ready: () => drawing.getSnapshot().matches('ready') && !!under.blob,
+  request: signal => {
     const mode = $('#readMode').value, note = $('#readNote').value.trim().slice(0, 1000);
     const prompt = READ + (mode === 'floorplan' ? '\nThe person says this is a floor plan. Trace it.' : mode === 'land' ? '\nThe person says this is land. Design a home on it.' : '') + (note ? `\nNotes from the person: ${note}` : '');
-    const r = applyReading(await sample.json(prompt, { images: under.blob, signal, cache: false, modelTier: 'complex', onText: () => fileStatus('Reading the drawing.') }));
-    fileStatus(r.kind === 'land'
-      ? `Drew the plot (${polyArea(r.plan.plot).toFixed(0)} m²) and a ${r.plan.rooms.length}-room home on it. This is a first draft: check the plot size against your documents, then adjust.`
-      : `Traced ${r.plan.rooms.length} rooms, reading the drawing as ${r.W.toFixed(1)} m wide. This is a first draft: compare it with the drawing underneath and drag rooms to correct it.`);
-  });
+    return sample.json(prompt, { images: under.blob, signal, cache: false, modelTier: 'complex', onText: () => read.send({ type: 'TEXT' }) });
+  },
+  apply: data => { const r = applyReading(data); return r.kind === 'land'
+    ? `Drew the plot (${polyArea(r.plan.plot).toFixed(0)} m²) and a ${r.plan.rooms.length}-room home on it. This is a first draft: check the plot size against your documents, then adjust.`
+    : `Traced ${r.plan.rooms.length} rooms, reading the drawing as ${r.W.toFixed(1)} m wide. This is a first draft: compare it with the drawing underneath and drag rooms to correct it.`; },
+}));
+const scalePoints = () => { const s = tool.getSnapshot(); return s.matches('scaling') ? s.context.pts : []; };
+
+// The page reads the machines; nothing else decides what is shown, hidden or disabled.
+function bindTask(actor, card, btn, stop, input) {
+  const paint = s => {
+    const busy = s.matches('working'), blocked = s.matches('blocked');
+    card.hidden = s.matches('unavailable'); card.setAttribute('aria-busy', String(busy));
+    btn.disabled = busy; btn.hidden = blocked; stop.hidden = !busy; if (input) input.disabled = blocked;
+  };
+  actor.subscribe(paint); paint(actor.getSnapshot());
+  btn.addEventListener('click', () => actor.send({ type: 'RUN' })); stop.addEventListener('click', () => actor.send({ type: 'STOP' }));
+}
+bindTask(describe, $('#askCard'), $('#askBtn'), $('#askStop'), $('#askText'));
+bindTask(read, $('#readBox'), $('#readBtn'), $('#readStop'));
+drawing.subscribe(syncFile);
+let toolShown = '';
+tool.subscribe(s => {
+  const now = JSON.stringify(s.value) + s.context.pts.length; if (now === toolShown) return; toolShown = now;
+  const scaling = s.matches('scaling');
+  $('#scaleForm').hidden = !s.matches({ scaling: 'distance' }); $('#ulScale').textContent = scaling ? 'Cancel scale' : 'Set scale';
+  if (state.plan) render2D();
+});
+
+/* ---------- window.roomlines: the same controls, for scripts, tests and agents ---------- */
+const actors = { tool, drawing, describe, read }, listeners = new Set(), log = [];
+const flat = v => typeof v === 'string' ? v : Object.entries(v).map(([k, c]) => `${k}.${flat(c)}`).join('+');
+const api = {
+  version: 1, debug: false, log,
+  getState: () => ({
+    machines: Object.fromEntries(Object.entries(actors).map(([k, a]) => [k, flat(a.getSnapshot().value)])),
+    view: { mode: state.mode, furniture: state.furniture, cut: state.cut, zoomHome: state.zoomHome },
+    selection: state.sel,
+    drawing: under.url ? { name: under.name, widthM: Math.round(under.w * under.mpp * 100) / 100, page: drawing.getSnapshot().context.page, pages: drawing.getSnapshot().context.pages } : null,
+  }),
+  getPlan: () => ({ name: state.plan.name, units: 'm', rooms: state.plan.rooms.map(r => ({ id: r.id, name: r.name, type: r.type, x: r.x, y: r.y, w: r.w, h: r.h })), plot: state.plan.plot || null }),
+  loadPlan: json => { setPlan(normalizePlan(json)); return api.getPlan(); },
+  roomTypes: () => Object.keys(TYPES),
+  addRoom, updateRoom, removeRoom,
+  select: id => { select(id); return state.sel; },
+  setView: (o = {}) => {
+    if (['both', '3d', 'plan'].includes(o.mode)) setMode(o.mode);
+    if (typeof o.furniture === 'boolean') { state.furniture = o.furniture; $('#optFurniture').checked = o.furniture; }
+    if (typeof o.cut === 'boolean') { state.cut = o.cut; $('#optCut').checked = o.cut; }
+    if (typeof o.zoomHome === 'boolean') state.zoomHome = o.zoomHome;
+    render2D(); view.build(); notify(); return api.getState().view;
+  },
+  openFile: file => handleFile(file),
+  can: (machine, event) => { const a = actors[machine]; return !!a && a.getSnapshot().can(typeof event === 'string' ? { type: event } : event); },
+  send: (machine, event) => { const a = actors[machine]; if (!a) throw new Error(`Unknown machine "${machine}". Use one of: ${Object.keys(actors).join(', ')}.`); a.send(typeof event === 'string' ? { type: event } : event); return flat(a.getSnapshot().value); },
+  subscribe: fn => { listeners.add(fn); return () => listeners.delete(fn); },
+};
+function notify() { if (!state.plan) return; const now = api.getState(); listeners.forEach(fn => { try { fn(now); } catch (e) {} }); }
+const wrapEl = document.querySelector('.wrap');
+for (const [name, actor] of Object.entries(actors)) {
+  let last = null;
+  const mirror = s => {
+    const now = flat(s.value); if (now === last) return;
+    log.push({ at: Date.now(), machine: name, from: last, to: now }); if (log.length > 100) log.shift();
+    if (api.debug) console.debug(`[roomlines] ${name}: ${last} -> ${now}`);
+    last = now; wrapEl.dataset[name] = now; notify();
+  };
+  actor.subscribe(mirror); actor.start(); mirror(actor.getSnapshot());
+}
+window.roomlines = api;
+(async () => {
+  try { sample = window.claude && window.claude.use ? await window.claude.use('sample') : null; } catch (e) { sample = null; }
+  if (!sample) return;
+  describe.send({ type: 'AVAILABLE' });
+  let lim = null; try { lim = await sample.limits(); } catch (e) { lim = null; }
+  if (lim && lim.images) read.send({ type: 'AVAILABLE' });
 })();
 
 /* ---------- start ---------- */
@@ -1219,7 +1427,7 @@ let first = null;
 try { const saved = store.get(); if (saved) first = normalizePlan(saved); } catch (e) { first = null; }
 setMode(window.matchMedia && window.matchMedia('(max-width: 980px)').matches ? '3d' : 'both');
 setPlan(first || normalizePlan(PRESETS[2]));
-window.__roomlines = { state, under, analyze, furnish, normalizePlan, setPlan, applyReading, handleFile, PRESETS };
+window.__roomlines = { state, under, analyze, furnish, normalizePlan, setPlan, applyReading, handleFile, PRESETS }; // internals, for the tests only
 })();
 </script>
 </body>

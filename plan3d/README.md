@@ -40,7 +40,7 @@ Claude estimates the scale from printed dimensions or from door and furniture si
 
 ## Putting it on a website
 
-Copy `index.html` to any static host. It loads three.js r128 from cdnjs and three fonts from Google Fonts. The first time someone uploads a PDF it also loads pdf.js 3.11.174 from cdnjs. Uploaded files are read in the browser and are not sent anywhere, except to Claude when "Read it with Claude" is pressed.
+Copy `index.html` to any static host. It loads XState 5.33.3 from jsDelivr (unpkg if that fails), three.js r128 from cdnjs and three fonts from Google Fonts. The first time someone uploads a PDF it also loads pdf.js 3.11.174 from cdnjs. Uploaded files are read in the browser and are not sent anywhere, except to Claude when "Read it with Claude" is pressed.
 
 To put it inside an existing app, load `index.html` in an iframe, or copy the contents of `app.html` into a page of the app. The current plan is saved in the browser's local storage under `roomlines.plan`.
 
@@ -80,6 +80,80 @@ The box also accepts a nested layout, which cannot produce gaps or overlaps:
 ## Drawing from a description
 
 Opened as a Claude artifact, the page shows a "Describe a home" box. It sends the description to Claude, which answers with a nested layout, and the page draws it. This box and "Read it with Claude" are hidden everywhere else, because a page on another host has no Claude to call. Uploading, the scale tool and tracing by hand work on any host. To get a drawn layout there, ask Claude in a chat for a plan in the nested layout format and paste the answer into "Plan data".
+
+## State machines
+
+Four flows in the page have more than two steps. Each one is an [XState](https://github.com/statelyai/xstate) v5 machine, defined in the "state machines" section of `app.html`. A machine only records which step its flow is in. The plan itself stays in `state.plan`.
+
+| Machine | States | What it controls |
+|---|---|---|
+| `tool` | `idle`, `moving`, `resizing`, `scaling.first`, `scaling.second`, `scaling.distance` | What the pointer does on the 2D plan: dragging a room, dragging a corner, or the two clicks and the distance of "Set scale". Escape cancels any of them. |
+| `drawing` | `empty`, `opening`, `ready`, `turning` | The uploaded image or PDF. A newer file or page turn replaces one that is still loading, so results cannot arrive out of order. |
+| `describe` | `unavailable`, `idle`, `working.thinking`, `working.writing`, `blocked` | The "Draw it with Claude" request. |
+| `read` | the same states as `describe` | The "Read it with Claude" request. It stops if the drawing changes while Claude is reading it. |
+
+```mermaid
+stateDiagram-v2
+  direction LR
+  state tool {
+    [*] --> idle
+    idle --> moving: ROOM.PRESS
+    idle --> resizing: HANDLE.PRESS
+    moving --> idle: POINTER.UP / CANCEL
+    resizing --> idle: POINTER.UP / CANCEL
+    idle --> scaling: SCALE.START
+    scaling --> idle: SCALE.APPLY / SCALE.CANCEL
+  }
+  state drawing {
+    [*] --> empty
+    empty --> opening: FILE
+    opening --> ready: loaded
+    opening --> empty: failed
+    ready --> turning: PAGE.NEXT / PAGE.PREV
+    turning --> ready: drawn
+    ready --> opening: FILE
+    ready --> empty: REMOVE
+  }
+```
+
+The current state of each machine is written on the page's outer `.wrap` element as `data-tool`, `data-drawing`, `data-describe` and `data-read`. CSS and tests can select on those, for example `.wrap[data-tool^="scaling"]`.
+
+Simple on/off settings (furniture, cut walls, view mode, the selected room) are plain values in `state`. They have no steps to get wrong, so a machine would add code and remove nothing.
+
+When a new flow has steps that must happen in order, or work that can be interrupted, add it as a machine. Do not add a flag.
+
+## Scripting the page
+
+`window.roomlines` drives the page without clicking. The buttons use the same functions, so a script cannot reach a state the page cannot.
+
+```js
+roomlines.getState()   // { machines: { tool: 'idle', drawing: 'empty', ... }, view, selection, drawing }
+roomlines.getPlan()    // { name, units, rooms: [{ id, name, type, x, y, w, h }], plot }
+roomlines.loadPlan({ rooms: [{ name: 'Lounge', x: 0, y: 0, w: 5, h: 4 }] })
+
+const id = roomlines.addRoom({ name: 'Office', type: 'office', x: 5, y: 0, w: 3, h: 3 })
+roomlines.updateRoom(id, { w: 4 })       // values snap to the 0.25 m grid
+roomlines.removeRoom(id)
+roomlines.select(id)
+roomlines.setView({ mode: '3d', furniture: false, cut: true })
+
+roomlines.can('tool', 'SCALE.START')     // false until a drawing is loaded
+roomlines.send('drawing', 'PAGE.NEXT')   // returns the machine's new state
+roomlines.openFile(file)                 // a File, as if it had been uploaded
+const stop = roomlines.subscribe(s => console.log(s.machines))
+roomlines.log                            // the last 100 transitions
+roomlines.debug = true                   // print each transition to the console
+```
+
+## Tests
+
+`tests/run.js` opens `index.html` in headless Chromium and checks editing, uploads, the scale tool, both Claude flows against a stand-in, the scripting API, the phone layout and a failed script download. It needs Playwright with Chromium available to Node.
+
+```bash
+cd plan3d/tests && npm install && npm test
+```
+
+Run `./plan3d/build.sh` first if `app.html` changed, because the tests load `index.html`.
 
 ## Limits
 
